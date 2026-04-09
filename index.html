@@ -6,6 +6,9 @@
       name="viewport"
       content="width=device-width, initial-scale=1, user-scalable=no"
     />
+    <!-- Required for WebView camera access -->
+    <meta http-equiv="Feature-Policy" content="camera *; microphone *" />
+    <meta http-equiv="Permissions-Policy" content="camera=*, microphone=*" />
     <title>Seepage AR Scanner</title>
 
     <!-- AR.js + A-Frame -->
