@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Wall Seepage AR Detection</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;600;800&display=swap');
+
+  :root {
+    --wet:    #00e5ff;
+    --moist:  #ffbe00;
+    --dry:    #69ff47;
+    --danger: #ff3b3b;
+    --bg:     #040d14;
+    --panel:  rgba(0,20,35,0.82);
+    --border: rgba(0,229,255,0.18);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Share Tech Mono', monospace;
+    background: var(--bg);
+    color: #cde;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(0,229,255,0.04);
+  }
+  .logo-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--wet);
+    box-shadow: 0 0 10px var(--wet);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  header h1 {
+    font-family: 'Exo 2', sans-serif;
+    font-weight: 800;
+    font-size: 1rem;
+    letter-spacing: .12em;
+    color: var(--wet);
+    text-transform: uppercase;
+  }
+  .status-pill {
+    margin-left: auto;
+    padding: 3px 12px;
+    border-radius: 20px;
+    font-size: .7rem;
+    letter-spacing: .08em;
+    border: 1px solid var(--border);
+    color: #7af;
+  }
+  .status-pill.ready  { border-color: var(--dry);    color: var(--dry); }
+  .status-pill.active { border-color: var(--wet);    color: var(--wet); box-shadow: 0 0 8px var(--wet); }
+  .status-pill.error  { border-color: var(--danger); color: var(--danger); }
+
+  .app { display: flex; flex-direction: column; }
+
+  #viewport {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16/9;
+    background: #000;
+    overflow: hidden;
+  }
+  #camera { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  #viewport::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 3px,
+      rgba(0,229,255,0.025) 3px, rgba(0,229,255,0.025) 4px
+    );
+    pointer-events: none; z-index: 2;
+  }
+
+  .bracket {
+    position: absolute; width: 36px; height: 36px;
+    border-color: var(--wet); border-style: solid; opacity: .7; z-index: 3;
+  }
+  .br-tl { top:12px; left:12px;  border-width:2px 0 0 2px; }
+  .br-tr { top:12px; right:12px; border-width:2px 2px 0 0; }
+  .br-bl { bottom:12px; left:12px;  border-width:0 0 2px 2px; }
+  .br-br { bottom:12px; right:12px; border-width:0 2px 2px 0; }
+
+  #scan-beam {
+    position: absolute; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, transparent, var(--wet), transparent);
+    box-shadow: 0 0 12px var(--wet);
+    top: 0; z-index: 4; opacity: 0; transition: opacity .3s;
+  }
+  #scan-beam.active { opacity: 1; animation: sweep 1.8s ease-in-out infinite; }
+  @keyframes sweep { 0%{top:0%} 100%{top:100%} }
+
+  #ar-canvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none; z-index: 5;
+  }
+
+  #result-badge {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 6; text-align: center;
+    opacity: 0; transition: opacity .4s;
+    background: rgba(4,13,20,0.7);
+    padding: 14px 28px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+  }
+  #result-badge.show { opacity: 1; }
+  .badge-label {
+    font-family: 'Exo 2', sans-serif;
+    font-weight: 800;
+    font-size: 1.6rem;
+    letter-spacing: .15em;
+    text-transform: uppercase;
+    text-shadow: 0 0 20px currentColor;
+  }
+  .badge-sub { font-size: .7rem; letter-spacing: .1em; opacity: .7; margin-top: 4px; }
+  .badge-wet   { color: var(--wet); }
+  .badge-moist { color: var(--moist); }
+  .badge-dry   { color: var(--dry); }
+
+  #no-cam {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 10px; z-index: 1;
+    color: rgba(0,229,255,.4);
+  }
+  #no-cam p { font-size: .75rem; letter-spacing: .08em; }
+
+  .panel {
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    padding: 18px 20px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+
+  .panel-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-start; }
+
+  .csi-section { flex: 1; min-width: 220px; }
+  .csi-section label {
+    display: block; font-size: .68rem;
+    letter-spacing: .1em; color: var(--wet);
+    margin-bottom: 6px; text-transform: uppercase;
+  }
+  #csi-input {
+    width: 100%; height: 78px;
+    background: rgba(0,229,255,0.05);
+    border: 1px solid var(--border);
+    border-radius: 4px; color: #9de;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: .72rem; padding: 8px 10px;
+    resize: none; outline: none; transition: border-color .2s;
+  }
+  #csi-input:focus { border-color: rgba(0,229,255,.5); }
+
+  .btn-group { display: flex; flex-direction: column; gap: 8px; min-width: 130px; }
+
+  .btn {
+    padding: 10px 18px; border-radius: 4px; border: 1px solid;
+    font-family: 'Share Tech Mono', monospace; font-size: .75rem;
+    letter-spacing: .08em; cursor: pointer; text-transform: uppercase; transition: all .2s;
+  }
+  .btn-primary { background: rgba(0,229,255,.1); border-color: var(--wet); color: var(--wet); }
+  .btn-primary:hover:not(:disabled) { background: rgba(0,229,255,.22); box-shadow: 0 0 14px rgba(0,229,255,.35); }
+  .btn-primary:disabled { opacity: .35; cursor: not-allowed; }
+  .btn-secondary { background: transparent; border-color: rgba(0,229,255,.25); color: #7ab; }
+  .btn-secondary:hover { border-color: rgba(0,229,255,.5); color: #adf; }
+
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+  }
+  .metric {
+    background: rgba(0,229,255,0.04);
+    border: 1px solid var(--border);
+    border-radius: 4px; padding: 10px 12px;
+  }
+  .metric-label { font-size: .6rem; letter-spacing: .1em; color: rgba(0,229,255,.5); text-transform: uppercase; margin-bottom: 4px; }
+  .metric-value { font-family: 'Exo 2', sans-serif; font-size: 1.1rem; font-weight: 600; color: var(--wet); }
+  .metric-value.yellow { color: var(--moist); }
+  .metric-value.green  { color: var(--dry); }
+  .metric-value.red    { color: var(--danger); }
+
+  .conf-row { display: flex; flex-direction: column; gap: 6px; }
+  .conf-label { display: flex; justify-content: space-between; font-size: .68rem; color: rgba(0,229,255,.5); }
+  .conf-track { height: 6px; background: rgba(0,229,255,.08); border-radius: 3px; overflow: hidden; }
+  .conf-fill { height: 100%; width: 0%; border-radius: 3px; background: var(--wet); transition: width .6s ease, background .4s; }
+
+  #log {
+    background: rgba(0,0,0,.4); border: 1px solid var(--border);
+    border-radius: 4px; height: 90px; overflow-y: auto;
+    padding: 8px 10px; font-size: .67rem; color: rgba(0,229,255,.55); line-height: 1.6;
+  }
+  #log .log-ok   { color: var(--dry); }
+  #log .log-warn { color: var(--moist); }
+  #log .log-err  { color: var(--danger); }
+
+  .model-status { display: flex; gap: 14px; flex-wrap: wrap; }
+  .ms-item { display: flex; align-items: center; gap: 6px; font-size: .68rem; color: rgba(0,229,255,.5); }
+  .ms-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: rgba(0,229,255,.2); transition: background .3s, box-shadow .3s;
+  }
+  .ms-dot.loaded { background: var(--dry); box-shadow: 0 0 6px var(--dry); }
+  .ms-dot.error  { background: var(--danger); }
+
+  /* important notice box */
+  .notice {
+    background: rgba(255,190,0,0.06);
+    border: 1px solid rgba(255,190,0,0.3);
+    border-radius: 4px; padding: 10px 14px;
+    font-size: .68rem; color: var(--moist); line-height: 1.7;
+  }
+  .notice strong { color: #ffd555; }
+
+  #log::-webkit-scrollbar { width: 3px; }
+  #log::-webkit-scrollbar-thumb { background: rgba(0,229,255,.2); border-radius: 2px; }
+
+  @media (max-width: 500px) {
+    .metrics { grid-template-columns: repeat(2, 1fr); }
+    .panel-row { flex-direction: column; }
+    .btn-group { flex-direction: row; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo-dot"></div>
+  <h1>SeepageAR — Wall Seepage Detection</h1>
+  <span id="status-pill" class="status-pill">INITIALIZING</span>
+</header>
+
+<div class="app">
+
+  <div id="viewport">
+    <video id="camera" autoplay muted playsinline></video>
+    <canvas id="ar-canvas"></canvas>
+    <div class="bracket br-tl"></div>
+    <div class="bracket br-tr"></div>
+    <div class="bracket br-bl"></div>
+    <div class="bracket br-br"></div>
+    <div id="scan-beam"></div>
+    <div id="result-badge">
+      <div class="badge-label" id="badge-text">—</div>
+      <div class="badge-sub" id="badge-sub">AWAITING SCAN</div>
+    </div>
+    <div id="no-cam">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+        <rect x="2" y="7" width="20" height="14" rx="2"/>
+        <path d="M16 3l-4 4-4-4"/>
+        <circle cx="12" cy="14" r="3"/>
+      </svg>
+      <p>CAMERA NOT STARTED</p>
+    </div>
+  </div>
+
+  <div class="panel">
+
+    <!-- important notice -->
+    <div class="notice">
+      <strong>⚙ SETUP REQUIRED:</strong> Open this file and set <code>CONFIG.INPUT_FEATURES</code> to match your model's input size.
+      Run <code>model.summary()</code> in Colab on your .h5 file to find the exact input shape.
+      Default is set to <strong>128 features</strong>. Your folder structure looks correct (models/detection/ and models/localization/).
+    </div>
+
+    <div class="model-status">
+      <div class="ms-item"><div class="ms-dot" id="dot-det"></div><span>Detection model</span></div>
+      <div class="ms-item"><div class="ms-dot" id="dot-loc"></div><span>Localization model</span></div>
+      <div class="ms-item"><div class="ms-dot" id="dot-cam"></div><span>Camera</span></div>
+    </div>
+
+    <div class="panel-row">
+      <div class="csi-section">
+        <label>CSI Data Input — comma-separated values from ESP32-S3</label>
+        <textarea id="csi-input" placeholder="Paste CSI values here: 0.12, -0.34, 0.56, ...&#10;Or click 'Demo Data' to test with simulated values"></textarea>
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-primary" id="btn-scan" disabled>▶ Run Detection</button>
+        <button class="btn btn-secondary" id="btn-demo">Demo Data</button>
+        <button class="btn btn-secondary" id="btn-cam">Start Camera</button>
+      </div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-label">Detection Result</div>
+        <div class="metric-value" id="m-result">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Confidence</div>
+        <div class="metric-value" id="m-conf">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Distance Est.</div>
+        <div class="metric-value" id="m-dist">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Angle Est.</div>
+        <div class="metric-value" id="m-angle">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Input Features</div>
+        <div class="metric-value" id="m-features">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Inference Time</div>
+        <div class="metric-value" id="m-time">—</div>
+      </div>
+    </div>
+
+    <div class="conf-row">
+      <div class="conf-label"><span>WET</span><span id="conf-wet-pct">0%</span></div>
+      <div class="conf-track"><div class="conf-fill" id="conf-wet-bar" style="background:var(--wet)"></div></div>
+    </div>
+    <div class="conf-row">
+      <div class="conf-label"><span>MODERATELY MOIST</span><span id="conf-moist-pct">0%</span></div>
+      <div class="conf-track"><div class="conf-fill" id="conf-moist-bar" style="background:var(--moist)"></div></div>
+    </div>
+    <div class="conf-row">
+      <div class="conf-label"><span>DRY</span><span id="conf-dry-pct">0%</span></div>
+      <div class="conf-track"><div class="conf-fill" id="conf-dry-bar" style="background:var(--dry)"></div></div>
+    </div>
+
+    <div id="log"><span class="log-ok">[INIT] SeepageAR system starting...</span></div>
+
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+//  CONFIGURATION  ← EDIT THIS SECTION TO MATCH YOUR TRAINED MODEL
+// ═══════════════════════════════════════════════════════════════
+const CONFIG = {
+
+  // ► How to find INPUT_FEATURES:
+  //   Open Google Colab → upload your .h5 file → run:
+  //     import tensorflow as tf
+  //     m = tf.keras.models.load_model('detection_model.h5')
+  //     m.summary()
+  //   Look at "Input Shape" — e.g. (None, 128, 1) means INPUT_FEATURES = 128
+  INPUT_FEATURES: 128,
+
+  // ► Detection threshold: sigmoid output above this = seepage present
+  DETECTION_THRESHOLD: 0.5,
+
+  // ► Model file paths (relative to index.html)
+  //   Your VS Code shows:  models/detection/model.json  ✓
+  //                        models/localization/model.json  ✓
+  DETECTION_MODEL_PATH:    'models/detection/model.json',
+  LOCALIZATION_MODEL_PATH: 'models/localization/model.json',
+};
+// ═══════════════════════════════════════════════════════════════
+
+let detectionModel    = null;
+let localizationModel = null;
+let cameraStream      = null;
+
+const $   = id => document.getElementById(id);
+const log = (msg, type = '') => {
+  const el   = $('log');
+  const line = document.createElement('div');
+  line.className   = type ? `log-${type}` : '';
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+};
+
+// ── LOAD MODELS ───────────────────────────────────────────────
+async function loadModels() {
+  setStatus('LOADING', '');
+
+  // ── Detection model ──────────────────────────────────────────
+  // Architecture: Conv1D(64,k=7) → BN → MaxPool → Conv1D(128,k=3)
+  //               → Dropout(0.3) → MaxPool → Flatten → Dense(64) → Dense(1, sigmoid)
+  log(`Loading detection model from ${CONFIG.DETECTION_MODEL_PATH}...`);
+  try {
+    detectionModel = await tf.loadLayersModel(CONFIG.DETECTION_MODEL_PATH);
+    $('dot-det').classList.add('loaded');
+    log('Detection model loaded ✓', 'ok');
+
+    // Warmup — prevents first inference being slow
+    tf.tidy(() => {
+      const w = tf.zeros([1, CONFIG.INPUT_FEATURES, 1]);
+      detectionModel.predict(w);
+    });
+  } catch (e) {
+    $('dot-det').classList.add('error');
+    log(`Detection model FAILED: ${e.message}`, 'err');
+    log('Tip: Confirm model.json is at models/detection/model.json', 'warn');
+    log('Tip: Check INPUT_FEATURES matches your model input shape', 'warn');
+  }
+
+  // ── Localization model ───────────────────────────────────────
+  // Architecture: Conv1D(64,k=7) → BN → MaxPool → Conv1D(128,k=3)
+  //               → Dropout(0.3) → MaxPool → Flatten → Dense(128)
+  //               → angle_output(1, linear) + distance_output(1, linear)
+  log(`Loading localization model from ${CONFIG.LOCALIZATION_MODEL_PATH}...`);
+  try {
+    localizationModel = await tf.loadLayersModel(CONFIG.LOCALIZATION_MODEL_PATH);
+    $('dot-loc').classList.add('loaded');
+    log('Localization model loaded ✓', 'ok');
+
+    tf.tidy(() => {
+      const w = tf.zeros([1, CONFIG.INPUT_FEATURES, 1]);
+      localizationModel.predict(w);
+    });
+  } catch (e) {
+    $('dot-loc').classList.add('error');
+    log(`Localization model FAILED: ${e.message}`, 'err');
+    log('Detection will still work without localization', 'warn');
+  }
+
+  if (detectionModel) {
+    $('btn-scan').disabled = false;
+    setStatus('READY', 'ready');
+    log('System ready — paste CSI data or click Demo Data to test', 'ok');
+  } else {
+    setStatus('ERROR', 'error');
+    log('Cannot run without detection model', 'err');
+  }
+}
+
+// ── PREPROCESS CSI DATA ───────────────────────────────────────
+// Input:  array of raw float values from ESP32-S3
+// Output: tf.Tensor3D of shape [1, INPUT_FEATURES, 1]  ← Conv1D expects this
+function preprocessCSI(rawVals) {
+  let vals = [...rawVals];
+
+  // Adjust length to match model expectation
+  if (vals.length < CONFIG.INPUT_FEATURES) {
+    const pad = new Array(CONFIG.INPUT_FEATURES - vals.length).fill(0);
+    vals = [...vals, ...pad];
+    log(`Padded input: ${rawVals.length} → ${CONFIG.INPUT_FEATURES}`, 'warn');
+  } else if (vals.length > CONFIG.INPUT_FEATURES) {
+    vals = vals.slice(0, CONFIG.INPUT_FEATURES);
+    log(`Trimmed input: ${rawVals.length} → ${CONFIG.INPUT_FEATURES}`, 'warn');
+  }
+
+  // Z-score normalization — same as training preprocessing should be
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const std  = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) || 1e-8;
+  const norm = vals.map(v => (v - mean) / std);
+
+  // Reshape to [1, INPUT_FEATURES, 1] for Conv1D layer
+  return tf.tensor3d([norm.map(v => [v])]);
+}
+
+// ── RUN INFERENCE ─────────────────────────────────────────────
+async function runDetection() {
+  const raw = $('csi-input').value.trim();
+  if (!raw) { log('No CSI data — paste values or click Demo Data', 'warn'); return; }
+
+  const values = raw.split(/[\s,]+/).map(Number).filter(v => !isNaN(v));
+  if (values.length < 10) {
+    log(`Only ${values.length} values found — need at least 10`, 'err');
+    return;
+  }
+
+  $('m-features').textContent = values.length;
+  $('btn-scan').disabled = true;
+  $('scan-beam').classList.add('active');
+  setStatus('SCANNING', 'active');
+  log(`Inference starting on ${values.length} CSI features...`);
+
+  const t0 = performance.now();
+
+  try {
+    const input = preprocessCSI(values);
+
+    // ── Detection: sigmoid output ─────────────────────────────
+    const detTensor  = detectionModel.predict(input);
+    const detData    = await detTensor.data();
+    detTensor.dispose();
+
+    const seepageProb = detData[0]; // 0 = dry, 1 = wet
+
+    // Map sigmoid to 3-class probabilities
+    // Your model was trained binary (seepage/no-seepage) using sigmoid
+    // We derive wet/moist/dry from the continuous output
+    let result, wetP, moistP, dryP, badgeClass;
+    if (seepageProb >= 0.70) {
+      result = 'WET';
+      wetP = seepageProb; moistP = (1 - seepageProb) * 0.5; dryP = (1 - seepageProb) * 0.5;
+      badgeClass = 'badge-wet';
+    } else if (seepageProb >= CONFIG.DETECTION_THRESHOLD) {
+      result = 'MODERATELY MOIST';
+      moistP = seepageProb; wetP = seepageProb * 0.25; dryP = 1 - seepageProb;
+      badgeClass = 'badge-moist';
+    } else {
+      result = 'DRY';
+      dryP = 1 - seepageProb; wetP = seepageProb * 0.2; moistP = seepageProb * 0.8;
+      badgeClass = 'badge-dry';
+    }
+
+    // ── Localization: angle + distance outputs ────────────────
+    let angleDeg = null, distM = null;
+    if (localizationModel) {
+      try {
+        const locOutput = localizationModel.predict(input);
+        // Handle both single-tensor and multi-output cases
+        if (Array.isArray(locOutput)) {
+          // Multi-output model: [angle_tensor, distance_tensor]
+          const angleData = await locOutput[0].data();
+          const distData  = await locOutput[1].data();
+          angleDeg = angleData[0];
+          distM    = distData[0];
+          locOutput.forEach(t => t.dispose());
+        } else {
+          // Single tensor with 2 values: [angle, distance]
+          const locData = await locOutput.data();
+          angleDeg = locData[0];
+          distM    = locData.length > 1 ? locData[1] : null;
+          locOutput.dispose();
+        }
+      } catch (locErr) {
+        log(`Localization inference error: ${locErr.message}`, 'warn');
+      }
+    }
+
+    input.dispose();
+
+    const ms = Math.round(performance.now() - t0);
+    const confPct = Math.round(Math.max(wetP, moistP, dryP) * 100);
+
+    // ── Update metrics ────────────────────────────────────────
+    $('m-result').textContent = result;
+    $('m-result').className   = 'metric-value ' + (result === 'WET' ? 'red' : result === 'MODERATELY MOIST' ? 'yellow' : 'green');
+    $('m-conf').textContent   = confPct + '%';
+    $('m-dist').textContent   = distM    != null ? distM.toFixed(2) + ' m'  : 'N/A';
+    $('m-angle').textContent  = angleDeg != null ? angleDeg.toFixed(1) + '°' : 'N/A';
+    $('m-time').textContent   = ms + ' ms';
+
+    const setBar = (fillId, pctId, prob) => {
+      const pct = Math.round(prob * 100);
+      $(fillId).style.width   = pct + '%';
+      $(pctId).textContent    = pct + '%';
+    };
+    setBar('conf-wet-bar',   'conf-wet-pct',   wetP);
+    setBar('conf-moist-bar', 'conf-moist-pct', moistP);
+    setBar('conf-dry-bar',   'conf-dry-pct',   dryP);
+
+    // ── AR overlay ────────────────────────────────────────────
+    $('badge-text').className   = `badge-label ${badgeClass}`;
+    $('badge-text').textContent = result;
+    $('badge-sub').textContent  = `CONFIDENCE: ${confPct}%`;
+    $('result-badge').classList.add('show');
+    setTimeout(() => $('result-badge').classList.remove('show'), 5000);
+
+    drawAROverlay(result, confPct, angleDeg, distM);
+
+    log(`RESULT: ${result} | Confidence: ${confPct}% | Time: ${ms}ms`, 'ok');
+    if (angleDeg != null) log(`Location: Angle ${angleDeg.toFixed(1)}° | Distance ${distM?.toFixed(2)}m`, 'ok');
+
+  } catch (err) {
+    log(`Inference error: ${err.message}`, 'err');
+    console.error(err);
+  }
+
+  $('scan-beam').classList.remove('active');
+  $('btn-scan').disabled = false;
+  setStatus('READY', 'ready');
+}
+
+// ── AR CANVAS OVERLAY ─────────────────────────────────────────
+function drawAROverlay(result, conf, angle, dist) {
+  const canvas = $('ar-canvas');
+  const vp     = $('viewport');
+  canvas.width  = vp.offsetWidth;
+  canvas.height = vp.offsetHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (!canvas.width) return;
+
+  const W = canvas.width, H = canvas.height;
+  const cx = W / 2, cy = H / 2;
+
+  const color = result === 'WET'               ? '#00e5ff' :
+                result === 'MODERATELY MOIST'   ? '#ffbe00' : '#69ff47';
+
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur  = 20;
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = 2;
+  ctx.globalAlpha = 0.75;
+  ctx.setLineDash([8, 5]);
+
+  const rx = W * 0.22, ry = H * 0.28;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.globalAlpha = 0.07;
+  ctx.fillStyle   = color;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Angle line
+  if (angle != null) {
+    const rad = (angle * Math.PI) / 180;
+    ctx.globalAlpha = 0.55;
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = 1.5;
+    ctx.shadowBlur  = 8;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(rad) * rx * 0.8, cy + Math.sin(rad) * ry * 0.8);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // HUD text top-left
+  ctx.globalAlpha = 0.9;
+  ctx.shadowBlur  = 5;
+  ctx.fillStyle   = color;
+  ctx.font        = '600 11px "Share Tech Mono", monospace';
+  const lines = [
+    `CONDITION: ${result}`,
+    `CONFIDENCE: ${conf}%`,
+    dist  != null ? `DISTANCE: ${dist.toFixed(2)}m`   : null,
+    angle != null ? `ANGLE: ${angle.toFixed(1)} deg`  : null,
+  ].filter(Boolean);
+  lines.forEach((line, i) => ctx.fillText(line, 14, 26 + i * 17));
+
+  ctx.restore();
+}
+
+// ── CAMERA ────────────────────────────────────────────────────
+async function startCamera() {
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } }, audio: false
+    });
+    $('camera').srcObject = cameraStream;
+    $('no-cam').style.display = 'none';
+    $('dot-cam').classList.add('loaded');
+    $('btn-cam').textContent = 'Stop Camera';
+    $('btn-cam').onclick = stopCamera;
+    log('Camera started (rear camera preferred)', 'ok');
+  } catch (e) {
+    log(`Camera: ${e.message}`, 'err');
+    $('dot-cam').classList.add('error');
+  }
+}
+
+function stopCamera() {
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(t => t.stop());
+    cameraStream = null;
+    $('camera').srcObject = null;
+    $('no-cam').style.display = '';
+    $('dot-cam').classList.remove('loaded', 'error');
+    $('btn-cam').textContent = 'Start Camera';
+    $('btn-cam').onclick = startCamera;
+  }
+}
+
+// ── DEMO DATA ─────────────────────────────────────────────────
+function generateDemo() {
+  const conditions = ['wet', 'moist', 'dry'];
+  const c = conditions[Math.floor(Math.random() * 3)];
+  const vals = Array.from({ length: CONFIG.INPUT_FEATURES }, (_, i) => {
+    if (c === 'wet')   return +(0.5  + Math.sin(i * 0.3) * 0.3  + (Math.random() - .5) * 0.5).toFixed(4);
+    if (c === 'moist') return +(0.25 + Math.sin(i * 0.2) * 0.15 + (Math.random() - .5) * 0.25).toFixed(4);
+    return               +(0.04 + Math.sin(i * 0.1) * 0.03 + (Math.random() - .5) * 0.06).toFixed(4);
+  });
+  $('csi-input').value = vals.join(', ');
+  log(`Demo data generated — simulating ${c.toUpperCase()} wall (${vals.length} features)`, 'warn');
+}
+
+// ── HELPERS ───────────────────────────────────────────────────
+function setStatus(text, cls) {
+  $('status-pill').textContent = text;
+  $('status-pill').className   = 'status-pill ' + (cls || '');
+}
+
+// ── INIT ──────────────────────────────────────────────────────
+$('btn-scan').onclick = runDetection;
+$('btn-demo').onclick = generateDemo;
+$('btn-cam').onclick  = startCamera;
+
+window.addEventListener('load', () => {
+  log('TensorFlow.js v' + tf.version.tfjs + ' ready');
+  log(`Config: INPUT_FEATURES=${CONFIG.INPUT_FEATURES}, Threshold=${CONFIG.DETECTION_THRESHOLD}`);
+  loadModels();
+});
+</script>
+</body>
+</html>
